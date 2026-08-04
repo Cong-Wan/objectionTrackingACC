@@ -1,0 +1,15 @@
+# Author:
+# Version: 1.1
+# Date: 2026-06-05
+# Description: ByteTrack 追踪参数配置，字段名与 BYTETracker 内部参数保持一致，缺省字段由代码内默认值兜底
+
+track_high_thresh: 0.6
+track_low_thresh: 0.04
+new_track_thresh: 0.2
+track_buffer: 5
+match_thresh: 0.9
+aspect_ratio_thresh: 1.5
+min_box_area: 10
+mot20: false
+fuse_score: false
+frame_rate: 30
