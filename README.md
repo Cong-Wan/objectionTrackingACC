@@ -160,23 +160,26 @@ make -j$(nproc)
     --conf 0.01                          # 检测预过滤阈值，可选，默认 0.01
     --ioa 0.5                            # head→body IoA 匹配阈值，可选，默认 0.5
     --tracker-config config/tracker.yaml # ByteTrack 参数，可选
+    --debug                              # 逐帧各环节耗时与检测/匹配明细，可选
 ```
 
 > `--conf` 必须 ≤ tracker.yaml 中的 `track_low_thresh`，否则低分轨迹在预过滤阶段即被丢弃；启动时校验，超限直接报错退出。
 >
 > 输入支持本地视频文件（mp4/mkv/avi 等封装，编码需 NVDEC 支持：h264/hevc/vp9/av1 等，取决于 GPU 代次）；当前版本不支持网络流。
 
-输出结构（ID 由 ByteTrack 分配，通常从 1 起；帧号为原始解码帧序号，文件名 6 位补零 `%06d.jpg`）：
+输出结构（ID 由 ByteTrack 分配，通常从 1 起；帧号为原始解码帧序号 6 位补零；类别为匹配命中的 body 框 classId，`cls0=fullBody`、`cls2=upperBody`；裁剪图以 **PNG 无损**保存）：
 
 ```
 output/<视频名（不含扩展名）>/
-├── 1/
-│   ├── 000012.jpg        # 匹配到的 fullBody 裁剪图
-│   └── 000045.jpg
-├── 2/
-└── 3/
+├── 3810_125502_1/
+│   ├── 000012_cls0.png        # 命中 fullBody 裁剪图（无损）
+│   └── 000045_cls2.png        # 同一 track 在另一帧回退命中 upperBody
+├── 3810_125502_2/
+└── 3810_125502_3/
 ```
 
+> trackId 子目录名以**视频名**为前缀拼接（便于多视频产物同目录区分）；图片名由 **帧号 + 类别** 构成：`%06d_cls<classId>.png`。
+>
 > ⚠️ 重复运行同一视频会**直接覆盖**同名输出文件，请提前备份或更换 `--output`。
 
 引擎说明：`batch1.int8.engine` 由 performanceAnalysis 项目从 `best.onnx` 经 trtexec INT8 量化构建（类别定义见其 `models/best.metadata.json`），本项目不重复构建，直接使用现成 engine 文件。
