@@ -1,15 +1,16 @@
 /*
 Author: wilbur
-Version: 1.3
+Version: 1.4
 Date: 2026-08-04
 Description: trackCrop 应用入口：NVDEC 解码 -> TensorRT 检测（fullBody/head/upperBody）->
     head 送 ByteTrack 追踪 -> IoA 归属匹配（先 cls0 后 cls2）-> 匹配到的 body 框裁剪图按
-    output/<视频名stem>/<stem>_<trackId>/<%06d_cls类别>.png 无损保存。每 N 帧处理一帧。
+    output/<视频名stem>/<trackId>/<%06d_cls类别>.png 无损保存。每 N 帧处理一帧。
     1.1: 新增 --debug（逐帧各环节耗时+检测匹配明细）；输出改 PNG 无损；trackId 目录拼视频名前缀、
     图片名由帧号+类别构成。
     1.2: --debug 增强：逐帧打印各环节耗时（decode/infer/track/save）、全部 YOLO 检测明细（cls/conf/xyxy）、
     追踪输出行明细，并接入 BYTETracker 的 debugCallback 输出三轮匹配代价与匈牙利耗时。
     1.3: 新增 --min-size（默认 70）：裁剪框宽或高任一小于该值不保存，0 关闭过滤。
+    1.4: trackId 子目录不再拼接视频名前缀，改为纯 trackId：output/<视频名stem>/<trackId>/xxx.png。
 */
 
 #include "byteTracker.h"
@@ -401,7 +402,7 @@ int main(int argc, char** argv) {
                 }
 
                 int64_t trackId = static_cast<int64_t>(tracks(r, 4));  // float 存储，转回整型
-                std::filesystem::path dir = outRoot / (videoStem + "_" + std::to_string(trackId));
+                std::filesystem::path dir = outRoot / std::to_string(trackId);
                 std::error_code ec;
                 std::filesystem::create_directories(dir, ec);
                 if (ec) {
