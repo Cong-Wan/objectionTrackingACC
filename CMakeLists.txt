@@ -1,8 +1,10 @@
 #[[
 Author: wilbur
-Version: 1.0
+Version: 1.1
 Date: 2026-08-04
 Description: CMake 构建脚本，定义 C++17/CUDA 工程、依赖路径与 trackerCpp/otaCore/trackCrop 目标。
+    1.1: 新增 modules/encoder/nvencEncoder（NVENC SDK 直调硬编码 + libavformat mux），加入 otaCore 静态库，
+    链接 libnvidia-encode，包含 /usr/local/include/ffnvcodec。
 ]]
 
 cmake_minimum_required(VERSION 3.24)
@@ -119,13 +121,15 @@ add_library(otaCore STATIC
     ${CMAKE_SOURCE_DIR}/modules/common/logger.cpp
     ${CMAKE_SOURCE_DIR}/modules/common/nv12ToBgr.cu
     ${CMAKE_SOURCE_DIR}/modules/decoder/nvdecDecoder.cpp
+    ${CMAKE_SOURCE_DIR}/modules/encoder/nvencEncoder.cpp
     ${CMAKE_SOURCE_DIR}/modules/infer/gpuPreprocess.cu
     ${CMAKE_SOURCE_DIR}/modules/infer/trtInfer.cpp)
 target_include_directories(otaCore PUBLIC
     ${CMAKE_SOURCE_DIR}/modules/common
     ${CMAKE_SOURCE_DIR}/modules/decoder
+    ${CMAKE_SOURCE_DIR}/modules/encoder
     ${CMAKE_SOURCE_DIR}/modules/infer)
-target_link_libraries(otaCore PUBLIC ${OTA_LINK_LIBS})
+target_link_libraries(otaCore PUBLIC ${OTA_LINK_LIBS} nvidia-encode)
 
 # ---- trackCrop ----
 add_executable(trackCrop ${CMAKE_SOURCE_DIR}/apps/trackCrop/trackCropMain.cpp)
