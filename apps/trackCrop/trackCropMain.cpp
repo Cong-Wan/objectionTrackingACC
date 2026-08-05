@@ -1,6 +1,6 @@
 /*
 Author: wilbur
-Version: 1.2
+Version: 1.3
 Date: 2026-08-04
 Description: trackCrop 应用入口：NVDEC 解码 -> TensorRT 检测（fullBody/head/upperBody）->
     head 送 ByteTrack 追踪 -> IoA 归属匹配（先 cls0 后 cls2）-> 匹配到的 body 框裁剪图按
@@ -9,6 +9,7 @@ Description: trackCrop 应用入口：NVDEC 解码 -> TensorRT 检测（fullBody
     图片名由帧号+类别构成。
     1.2: --debug 增强：逐帧打印各环节耗时（decode/infer/track/save）、全部 YOLO 检测明细（cls/conf/xyxy）、
     追踪输出行明细，并接入 BYTETracker 的 debugCallback 输出三轮匹配代价与匈牙利耗时。
+    1.3: 新增 --min-size（默认 70）：裁剪框宽或高任一小于该值不保存，0 关闭过滤。
 */
 
 #include "byteTracker.h"
@@ -42,12 +43,13 @@ struct AppArgs {
     float conf = 0.01f;
     float ioa = 0.5f;
     std::string trackerConfigPath = "config/tracker.yaml";
+    int minSize = 70;
     bool debug = false;
 };
 
 void printUsage(const char* prog) {
     printf("Usage: %s --video <path> --engine <path> [--N int] [--output dir] [--conf float]\n"
-           "          [--ioa float] [--tracker-config path] [--debug] [--help]\n"
+           "          [--ioa float] [--tracker-config path] [--min-size int] [--debug] [--help]\n"
            "  --video           本地视频路径（必填）\n"
            "  --engine          TensorRT engine 路径（必填）\n"
            "  --N               每 N 帧处理一帧，N >= 1（默认 1）\n"
@@ -55,6 +57,7 @@ void printUsage(const char* prog) {
            "  --conf            预过滤阈值，必须 <= tracker track_low_thresh（默认 0.01）\n"
            "  --ioa             IoA 命中阈值，(0,1]（默认 0.5）\n"
            "  --tracker-config  追踪参数 yaml（默认 config/tracker.yaml）\n"
+           "  --min-size        裁剪框宽/高任一小于该值不保存，0 关闭过滤（默认 70）\n"
            "  --debug           打印逐帧各环节耗时与检测/匹配明细，便于排查追踪检测问题\n"
            "  --help            打印本用法\n",
            prog);
@@ -112,6 +115,13 @@ bool parseArgs(int argc, char** argv, AppArgs& args, bool& helpRequested) {
             if (!next("--output", args.outputDir)) return false;
         } else if (a == "--tracker-config") {
             if (!next("--tracker-config", args.trackerConfigPath)) return false;
+        } else if (a == "--min-size") {
+            std::string v;
+            if (!next("--min-size", v)) return false;
+            if (!parseInt(v, args.minSize) || args.minSize < 0) {
+                logError("--min-size must be an integer >= 0, got: " + v);
+                return false;
+            }
         } else if (a == "--debug") {
             args.debug = true;
         } else if (a == "--N") {
@@ -378,6 +388,16 @@ int main(int argc, char** argv) {
                 cv::Rect crop = clampToFrame(hit->x1, hit->y1, hit->x2, hit->y2, frameW, frameH);
                 if (crop.area() <= 0) {
                     continue;
+                }
+                if (crop.width < args.minSize || crop.height < args.minSize) {
+                    if (args.debug) {
+                        logDebug("frame " + std::to_string(frame->frameId) + " track " +
+                                 std::to_string(static_cast<int64_t>(tracks(r, 4))) +
+                                 " crop " + std::to_string(crop.width) + "x" +
+                                 std::to_string(crop.height) + " < min-size " +
+                                 std::to_string(args.minSize) + ", skipped");
+                    }
+                    continue;  // 任一边小于 min-size 不保存
                 }
 
                 int64_t trackId = static_cast<int64_t>(tracks(r, 4));  // float 存储，转回整型

@@ -160,6 +160,7 @@ make -j$(nproc)
     --conf 0.01                          # 检测预过滤阈值，可选，默认 0.01
     --ioa 0.5                            # head→body IoA 匹配阈值，可选，默认 0.5
     --tracker-config config/tracker.yaml # ByteTrack 参数，可选
+    --min-size 70                        # 裁剪框宽/高任一小于该值不保存，0 关闭过滤（默认 70）
     --debug                              # 逐帧调试明细（见下），可选
 ```
 
