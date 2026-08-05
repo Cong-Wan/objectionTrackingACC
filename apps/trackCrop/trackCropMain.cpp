@@ -1,12 +1,14 @@
 /*
 Author: wilbur
-Version: 1.1
+Version: 1.2
 Date: 2026-08-04
 Description: trackCrop 应用入口：NVDEC 解码 -> TensorRT 检测（fullBody/head/upperBody）->
     head 送 ByteTrack 追踪 -> IoA 归属匹配（先 cls0 后 cls2）-> 匹配到的 body 框裁剪图按
     output/<视频名stem>/<stem>_<trackId>/<%06d_cls类别>.png 无损保存。每 N 帧处理一帧。
     1.1: 新增 --debug（逐帧各环节耗时+检测匹配明细）；输出改 PNG 无损；trackId 目录拼视频名前缀、
     图片名由帧号+类别构成。
+    1.2: --debug 增强：逐帧打印各环节耗时（decode/infer/track/save）、全部 YOLO 检测明细（cls/conf/xyxy）、
+    追踪输出行明细，并接入 BYTETracker 的 debugCallback 输出三轮匹配代价与匈牙利耗时。
 */
 
 #include "byteTracker.h"
@@ -222,6 +224,9 @@ int main(int argc, char** argv) {
         cfg.frameRate = std::max(1, static_cast<int>(std::lround(decoder.fps() / args.n)));
         trackerCpp::BYTETracker::resetId();
         trackerCpp::BYTETracker tracker(cfg, cfg.frameRate);
+        if (args.debug) {
+            tracker.setDebugCallback([](const std::string& m) { logDebug(m); });
+        }
 
         // 7. 输出目录 output/<视频名stem>，trackId 子目录拼视频名前缀
         std::string videoStem = std::filesystem::path(args.videoPath).stem().string();
@@ -247,17 +252,23 @@ int main(int argc, char** argv) {
                 break;  // EOF 已排空
             }
             ++decoded;
-            decodeMsTotal += std::chrono::duration<double, std::milli>(
+            double decodeMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - tDecode0).count();
+            decodeMsTotal += decodeMs;
             if (frame->frameId % N != 0) {
+                if (args.debug) {
+                    logDebug("frame " + std::to_string(frame->frameId) + " skipped (decode=" +
+                             std::to_string(decodeMs) + " ms)");
+                }
                 continue;  // 跳过帧：不参与推理与追踪
             }
             ++processed;
 
             auto tInfer0 = std::chrono::steady_clock::now();
             std::vector<Detection> dets = infer.infer(*frame);  // 已 clamp 到显示宽高
-            inferMsTotal += std::chrono::duration<double, std::milli>(
+            double inferMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - tInfer0).count();
+            inferMsTotal += inferMs;
 
             // 1) 分流
             std::vector<Detection> heads, bodies0, bodies2;
@@ -275,6 +286,14 @@ int main(int argc, char** argv) {
                          std::to_string(dets.size()) + " heads=" + std::to_string(heads.size()) +
                          " cls0=" + std::to_string(bodies0.size()) + " cls2=" +
                          std::to_string(bodies2.size()));
+                for (size_t i = 0; i < dets.size(); ++i) {
+                    const Detection& d = dets[i];
+                    char detBuf[192];
+                    snprintf(detBuf, sizeof(detBuf),
+                             "  det[%zu]: cls=%d conf=%.4f xyxy=(%.1f,%.1f,%.1f,%.1f)",
+                             i, d.classId, d.confidence, d.x1, d.y1, d.x2, d.y2);
+                    logDebug("frame " + std::to_string(frame->frameId) + detBuf);
+                }
             }
 
             // 2) heads -> ByteTrack（xyxy 转 center-xywh）；空检测帧也必须 update，保证帧计数推进
@@ -294,14 +313,30 @@ int main(int argc, char** argv) {
             }
             auto tTrack0 = std::chrono::steady_clock::now();
             Eigen::MatrixXf tracks = tracker.update(input);  // 每行 [x1,y1,x2,y2,trackId,score,cls,idx]
-            trackMsTotal += std::chrono::duration<double, std::milli>(
+            double trackMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - tTrack0).count();
-            if (args.debug && tracks.rows() > 0) {
+            trackMsTotal += trackMs;
+            if (args.debug) {
                 logDebug("frame " + std::to_string(frame->frameId) + " tracks=" +
                          std::to_string(tracks.rows()));
+                for (int r = 0; r < tracks.rows(); ++r) {
+                    char trkBuf[192];
+                    snprintf(trkBuf, sizeof(trkBuf),
+                             "  trackOut: id=%d score=%.4f box=(%.1f,%.1f,%.1f,%.1f)",
+                             static_cast<int>(tracks(r, 4)), tracks(r, 5),
+                             tracks(r, 0), tracks(r, 1), tracks(r, 2), tracks(r, 3));
+                    logDebug("frame " + std::to_string(frame->frameId) + trkBuf);
+                }
             }
 
+            double saveMs = 0.0;
             if (tracks.rows() == 0) {
+                if (args.debug) {
+                    logDebug("frame " + std::to_string(frame->frameId) +
+                             " timing: decode=" + std::to_string(decodeMs) +
+                             " infer=" + std::to_string(inferMs) +
+                             " track=" + std::to_string(trackMs) + " save=0 ms");
+                }
                 continue;
             }
 
@@ -369,11 +404,17 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            saveMsTotal += std::chrono::duration<double, std::milli>(
+            saveMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - tSave0).count();
-            if (args.debug && savedThisFrame > 0) {
+            saveMsTotal += saveMs;
+            if (args.debug) {
                 logDebug("frame " + std::to_string(frame->frameId) + " saved " +
                          std::to_string(savedThisFrame) + " crops");
+                logDebug("frame " + std::to_string(frame->frameId) +
+                         " timing: decode=" + std::to_string(decodeMs) +
+                         " infer=" + std::to_string(inferMs) +
+                         " track=" + std::to_string(trackMs) +
+                         " save=" + std::to_string(saveMs) + " ms");
             }
         }
 

@@ -160,8 +160,15 @@ make -j$(nproc)
     --conf 0.01                          # 检测预过滤阈值，可选，默认 0.01
     --ioa 0.5                            # head→body IoA 匹配阈值，可选，默认 0.5
     --tracker-config config/tracker.yaml # ByteTrack 参数，可选
-    --debug                              # 逐帧各环节耗时与检测/匹配明细，可选
+    --debug                              # 逐帧调试明细（见下），可选
 ```
+
+`--debug` 逐帧打印（便于排查检测/追踪问题）：
+
+- **每帧各环节耗时**：`frame N timing: decode=.. infer=.. track=.. save=.. ms`（跳过帧只打 decode）
+- **YOLO 检测明细**：每条 `det[i]: cls=.. conf=.. xyxy=(..)` 及 heads/cls0/cls2 分流统计
+- **追踪代价明细**（由 BYTETracker 内部回调输出）：高/低分检测划分、轨迹池构成、三轮匹配的代价矩阵尺寸/匈牙利求解耗时/匹配对数/未匹配数、逐匹配对的 `trackId <- det#i score cost`，以及 activated/refind/lost/removed 状态统计
+- **追踪输出与归属**：每个 trackOut（id/score/box）、IoA 命中类别与数值、保存文件名；结束汇总各环节平均耗时
 
 > `--conf` 必须 ≤ tracker.yaml 中的 `track_low_thresh`，否则低分轨迹在预过滤阶段即被丢弃；启动时校验，超限直接报错退出。
 >

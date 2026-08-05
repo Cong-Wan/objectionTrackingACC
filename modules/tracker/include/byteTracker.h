@@ -1,8 +1,9 @@
 /*
 Author:
-Version: 1.4
-Date: 2026-06-06
+Version: 1.5
+Date: 2026-08-04
 Description: 翻译 byte_tracker.py 的 STrack 与 BYTETracker 声明，补齐 xywh2ltwh 批量重载并保留 C++ 安全接口
+    1.5: 新增 debugCallback 钩子（默认关闭，不改变行为），供应用层排查匹配代价明细。
 */
 
 #ifndef TRACKER_CPP_BYTE_TRACKER_H
@@ -106,6 +107,11 @@ public:
     static void resetId();                                             // 重置全局轨迹 ID 计数器
     void reset();                                                      // 重置追踪器全部状态
 
+    // 调试钩子：设置后 update() 会回调输出高/低分划分、三轮匹配代价与耗时、轨迹状态统计；
+    // 默认空（不输出、不改变任何行为）。仅供排查追踪问题使用。
+    using DebugCallback = std::function<void(const std::string&)>;
+    void setDebugCallback(DebugCallback cb) { debugCallback = std::move(cb); }
+
     static std::vector<TrackPtr> jointStracks(const std::vector<TrackPtr>& tlista, const std::vector<TrackPtr>& tlistb);  // 合并两个轨迹列表（去重）
     static std::vector<TrackPtr> subStracks(const std::vector<TrackPtr>& tlista, const std::vector<TrackPtr>& tlistb);   // 轨迹列表差集
     static std::pair<std::vector<TrackPtr>, std::vector<TrackPtr>> removeDuplicateStracks(
@@ -121,6 +127,7 @@ public:
     int maxTimeLost;                        // 轨迹允许的最大丢失帧数
     KalmanFilterXYAH kalmanFilter;          // 本追踪器实例的卡尔曼滤波器
     GmcFunction gmc;                        // 全局运动补偿回调函数
+    DebugCallback debugCallback;            // 调试输出回调（默认空）
 };
 
 BYTETracker createByteTracker();

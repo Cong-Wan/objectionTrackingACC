@@ -1,8 +1,10 @@
 /*
 Author:
-Version: 1.4
-Date: 2026-06-06
+Version: 1.5
+Date: 2026-08-04
 Description: 翻译 byte_tracker.py 的 STrack 与 BYTETracker 实现，补齐 xywh2ltwh 批量重载、消除重载歧义并增加 GMC catch-all 容错
+    1.5: update() 增加 debugCallback 插桩（高/低分划分、三轮匹配代价矩阵/对数/匈牙利耗时、轨迹状态统计），
+    默认关闭不影响行为。
 */
 
 #include "byteTracker.h"
@@ -10,6 +12,7 @@ Description: 翻译 byte_tracker.py 的 STrack 与 BYTETracker 实现，补齐 x
 #include "matching.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -451,6 +454,15 @@ Eigen::MatrixXf BYTETracker::update(const DetectionResults& results, const Eigen
     const int fallbackResultCols = results.hasXywhr ? 9 : 8;
 
     frameId += 1;
+
+    // 调试插桩：debugCallback 非空时输出匹配代价明细（lambda 捕获，零行为变更）
+    const bool dbg = static_cast<bool>(debugCallback);
+    auto emit = [this](const std::string& msg) { debugCallback(msg); };
+    auto nowMs = []() { return std::chrono::steady_clock::now(); };
+    auto elapsedMs = [](auto t0) {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+
     std::vector<TrackPtr> activatedStracks;      // 本帧新激活的轨迹
     std::vector<TrackPtr> refindStracks;         // 本帧重新找回的轨迹
     std::vector<TrackPtr> lostStracksLocal;      // 本帧新标记为丢失的轨迹
@@ -470,6 +482,13 @@ Eigen::MatrixXf BYTETracker::update(const DetectionResults& results, const Eigen
         if (scores(i) > args.trackLowThresh && scores(i) < args.trackHighThresh) {
             secondInds.push_back(i);
         }
+    }
+
+    if (dbg) {
+        emit("tracker frame " + std::to_string(frameId) + ": input dets=" + std::to_string(scores.size()) +
+             " high(>=" + std::to_string(args.trackHighThresh) + ")=" + std::to_string(remainInds.size()) +
+             " low(" + std::to_string(args.trackLowThresh) + "~" + std::to_string(args.trackHighThresh) + ")=" +
+             std::to_string(secondInds.size()));
     }
 
     Eigen::MatrixXd detsSecond = selectRows(bboxes, secondInds);
@@ -496,6 +515,11 @@ Eigen::MatrixXf BYTETracker::update(const DetectionResults& results, const Eigen
     // 构造待匹配轨迹池：已确认轨迹 + 丢失轨迹，并执行卡尔曼预测
     std::vector<TrackPtr> strackPool = jointStracks(trackedStracksLocal, lostStracks);
     multiPredict(strackPool);
+    if (dbg) {
+        emit("tracker frame " + std::to_string(frameId) + ": pool confirmed=" +
+             std::to_string(trackedStracksLocal.size()) + " + lost=" + std::to_string(lostStracks.size()) +
+             " = " + std::to_string(strackPool.size()) + ", unconfirmed=" + std::to_string(unconfirmed.size()));
+    }
 
     // 若提供了 GMC 回调且存在图像数据，则执行全局运动补偿；异常时回退到单位变换
     if (gmc && img != nullptr) {
@@ -514,8 +538,24 @@ Eigen::MatrixXf BYTETracker::update(const DetectionResults& results, const Eigen
     }
 
     // 第一级匹配：strackPool（tracked + lost） vs 高分检测
+    auto tR1 = nowMs();
     Eigen::MatrixXd dists = getDists(strackPool, detections);
     AssignmentResult assignment = linearAssignment(dists, args.matchThresh);
+    if (dbg) {
+        emit("tracker frame " + std::to_string(frameId) + " round1: cost " +
+             std::to_string(strackPool.size()) + "x" + std::to_string(detections.size()) +
+             " (iouDist+score, thresh=" + std::to_string(args.matchThresh) + "), hungarian=" +
+             std::to_string(elapsedMs(tR1)) + " ms, matches=" + std::to_string(assignment.matches.size()) +
+             " unmatchedTracks=" + std::to_string(assignment.unmatchedA.size()) +
+             " unmatchedDets=" + std::to_string(assignment.unmatchedB.size()));
+        for (const auto& m : assignment.matches) {
+            const TrackPtr& det = detections[static_cast<size_t>(m.second)];
+            emit("  round1 match: trackId=" + std::to_string(strackPool[static_cast<size_t>(m.first)]->trackId) +
+                 " <- det#" + std::to_string(static_cast<int>(det->idx)) +
+                 " score=" + std::to_string(det->score) +
+                 " cost=" + std::to_string(dists(m.first, m.second)));
+        }
+    }
 
     for (const auto& match : assignment.matches) {
         TrackPtr track = strackPool[static_cast<size_t>(match.first)];
@@ -538,8 +578,24 @@ Eigen::MatrixXf BYTETracker::update(const DetectionResults& results, const Eigen
         }
     }
 
+    auto tR2 = nowMs();
     dists = iouDistance(tracksToBoxes(rTrackedStracks), tracksToBoxes(detectionsSecond));
     AssignmentResult secondAssignment = linearAssignment(dists, 0.5);
+    if (dbg) {
+        emit("tracker frame " + std::to_string(frameId) + " round2: cost " +
+             std::to_string(rTrackedStracks.size()) + "x" + std::to_string(detectionsSecond.size()) +
+             " (iouDist, thresh=0.5), hungarian=" + std::to_string(elapsedMs(tR2)) +
+             " ms, matches=" + std::to_string(secondAssignment.matches.size()) +
+             " unmatchedTracks(lost)=" + std::to_string(secondAssignment.unmatchedA.size()) +
+             " unmatchedLowDets=" + std::to_string(secondAssignment.unmatchedB.size()));
+        for (const auto& m : secondAssignment.matches) {
+            const TrackPtr& det = detectionsSecond[static_cast<size_t>(m.second)];
+            emit("  round2 match: trackId=" + std::to_string(rTrackedStracks[static_cast<size_t>(m.first)]->trackId) +
+                 " <- lowDet#" + std::to_string(static_cast<int>(det->idx)) +
+                 " score=" + std::to_string(det->score) +
+                 " cost=" + std::to_string(dists(m.first, m.second)));
+        }
+    }
     for (const auto& match : secondAssignment.matches) {
         TrackPtr track = rTrackedStracks[static_cast<size_t>(match.first)];
         const TrackPtr& det = detectionsSecond[static_cast<size_t>(match.second)];
@@ -563,8 +619,17 @@ Eigen::MatrixXf BYTETracker::update(const DetectionResults& results, const Eigen
 
     // 第三级匹配：未确认轨迹 vs 第一级未匹配的高分检测
     std::vector<TrackPtr> unmatchedDetections = selectTracks(detections, assignment.unmatchedB);
+    auto tR3 = nowMs();
     dists = getDists(unconfirmed, unmatchedDetections);
     AssignmentResult unconfirmedAssignment = linearAssignment(dists, 0.7);
+    if (dbg) {
+        emit("tracker frame " + std::to_string(frameId) + " round3: cost " +
+             std::to_string(unconfirmed.size()) + "x" + std::to_string(unmatchedDetections.size()) +
+             " (iouDist, thresh=0.7), hungarian=" + std::to_string(elapsedMs(tR3)) +
+             " ms, matches=" + std::to_string(unconfirmedAssignment.matches.size()) +
+             " unmatchedUnconfirmed(removed)=" + std::to_string(unconfirmedAssignment.unmatchedA.size()) +
+             " unmatchedDets=" + std::to_string(unconfirmedAssignment.unmatchedB.size()));
+    }
     for (const auto& match : unconfirmedAssignment.matches) {
         TrackPtr track = unconfirmed[static_cast<size_t>(match.first)];
         track->update(*unmatchedDetections[static_cast<size_t>(match.second)], frameId);
@@ -617,6 +682,14 @@ Eigen::MatrixXf BYTETracker::update(const DetectionResults& results, const Eigen
     // 防止 removedStracks 无限增长，仅保留最近 999 条
     if (removedStracks.size() > 1000) {
         removedStracks.erase(removedStracks.begin(), removedStracks.end() - 999);
+    }
+
+    if (dbg) {
+        emit("tracker frame " + std::to_string(frameId) + " summary: activated=" +
+             std::to_string(activatedStracks.size()) + " refind=" + std::to_string(refindStracks.size()) +
+             " lost=" + std::to_string(lostStracksLocal.size()) + " removed=" +
+             std::to_string(removedStracksLocal.size()) + " | tracked=" +
+             std::to_string(trackedStracks.size()) + " lostPool=" + std::to_string(lostStracks.size()));
     }
 
     return resultsToMatrix(trackedStracks, fallbackResultCols);
