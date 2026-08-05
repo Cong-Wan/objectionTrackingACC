@@ -173,6 +173,8 @@ make -j$(nproc)
 > `--conf` 必须 ≤ tracker.yaml 中的 `track_low_thresh`，否则低分轨迹在预过滤阶段即被丢弃；启动时校验，超限直接报错退出。
 >
 > 输入支持本地视频文件（mp4/mkv/avi 等封装，编码需 NVDEC 支持：h264/hevc/vp9/av1 等，取决于 GPU 代次）；当前版本不支持网络流。
+>
+> 色彩格式：要求 NV12 + BT.709，**full/limited 量程均支持**（预处理与 nv12ToBgr kernel 按帧自适应换算）；元数据 unspecified 时按行业惯例回退 limited + BT.709 并打 WARN；明确标记非 BT.709（如 BT.601）报错退出。
 
 输出结构（ID 由 ByteTrack 分配，通常从 1 起；帧号为原始解码帧序号 6 位补零；类别为匹配命中的 body 框 classId，`cls0=fullBody`、`cls2=upperBody`；裁剪图以 **PNG 无损**保存）：
 

@@ -1,10 +1,11 @@
 /*
 Author: wilbur
-Version: 1.0
-Date: 2026-06-27
-Description: CUDA GPU 预处理实现。NV12 full-range BT.709 -> RGB，letterbox bilinear resize，
-    padding 114，/255 归一化，输出 NCHW float32。坐标映射使用 half-pixel center，与
+Version: 1.1
+Date: 2026-08-04
+Description: CUDA GPU 预处理实现。NV12 BT.709（full/limited 量程自适应）-> RGB，letterbox bilinear
+    resize，padding 114，/255 归一化，输出 NCHW float32。坐标映射使用 half-pixel center，与
     OpenCV INTER_LINEAR 一致。
+    1.1: kernel 增加 fullRange 分支，limited 量程按 Y'=1.164383(Y-16)、UV 缩放 1.138393 换算。
 */
 
 #include "gpuPreprocess.h"
@@ -108,7 +109,8 @@ __global__ void nv12ToNchwKernel(
     int resizedHeight,
     int padX,
     int padY,
-    float scale) {
+    float scale,
+    int fullRange) {
     int dx = blockIdx.x * blockDim.x + threadIdx.x;
     int dy = blockIdx.y * blockDim.y + threadIdx.y;
     if (dx >= inputWidth || dy >= inputHeight) {
@@ -147,10 +149,19 @@ __global__ void nv12ToNchwKernel(
 
     float uu = u - 128.0f;
     float wv = vv - 128.0f;
-    // full-range BT.709
-    float r = y + 1.5748f * wv;
-    float g = y - 0.1873f * uu - 0.4681f * wv;
-    float b = y + 1.8556f * uu;
+    float r, g, b;
+    if (fullRange) {
+        // full-range BT.709
+        r = y + 1.5748f * wv;
+        g = y - 0.1873f * uu - 0.4681f * wv;
+        b = y + 1.8556f * uu;
+    } else {
+        // limited-range BT.709：Y'=1.164383(Y-16)，UV 缩放 1.138393 后套 full 公式系数
+        float ys = 1.164383f * (y - 16.0f);
+        r = ys + 1.79268f * wv;
+        g = ys - 0.21322f * uu - 0.53288f * wv;
+        b = ys + 2.11246f * uu;
+    }
     r = clampf(r, 0.0f, 255.0f);
     g = clampf(g, 0.0f, 255.0f);
     b = clampf(b, 0.0f, 255.0f);
@@ -175,6 +186,7 @@ void preprocessNv12ToNchw(
     int inputWidth,
     int inputHeight,
     const LetterboxParams& params,
+    bool fullRange,
     cudaStream_t stream) {
     (void)batchSize; // 仅 batchIndex 决定输出偏移
     dim3 block(16, 16);
@@ -182,5 +194,6 @@ void preprocessNv12ToNchw(
     nv12ToNchwKernel<<<grid, block, 0, stream>>>(
         yPlane, uvPlane, srcWidth, srcHeight, yPitch, uvPitch, dstNchw,
         batchIndex, inputWidth, inputHeight,
-        params.resizedWidth, params.resizedHeight, params.padX, params.padY, params.scale);
+        params.resizedWidth, params.resizedHeight, params.padX, params.padY, params.scale,
+        fullRange ? 1 : 0);
 }

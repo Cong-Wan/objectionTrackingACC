@@ -1,9 +1,10 @@
 /*
 Author: wilbur
-Version: 1.0
+Version: 1.1
 Date: 2026-08-04
 Description: FFmpeg CUDA/NVDEC 视频解码实现。使用 device 0 的 primary CUDA context，
-    强制输出 AV_PIX_FMT_CUDA，校验 NV12/full-range/BT.709，并在 EOF 时 flush 解码延迟帧。
+    强制输出 AV_PIX_FMT_CUDA，校验 NV12/BT.709（full/limited 量程均支持，写入 GpuFrame.fullRange；
+    元数据 unspecified 时按 limited + BT.709 回退并各 warn 一次），并在 EOF 时 flush 解码延迟帧。
 */
 
 #include "nvdecDecoder.h"
@@ -233,10 +234,26 @@ bool NvdecDecoder::readFrame(std::unique_ptr<Frame>& frame) {
             throw std::runtime_error("CUDA frame sw_format is not NV12 (got " +
                                      std::string(av_get_pix_fmt_name(framesCtx->sw_format)) + ")");
         }
-        if (avframe->color_range != AVCOL_RANGE_JPEG) {
-            throw std::runtime_error("Video color range is not full range (AVCOL_RANGE_JPEG)");
+        // 量程：full(pc) / limited(tv) 均支持；unspecified 按行业惯例回退 limited 并 warn 一次
+        bool fullRange;
+        if (avframe->color_range == AVCOL_RANGE_JPEG) {
+            fullRange = true;
+        } else if (avframe->color_range == AVCOL_RANGE_MPEG) {
+            fullRange = false;
+        } else {  // AVCOL_RANGE_UNSPECIFIED
+            if (!warnedColorRange_) {
+                logWarn("color range unspecified, assume limited (tv): " + videoPath_);
+                warnedColorRange_ = true;
+            }
+            fullRange = false;
         }
-        if (avframe->colorspace != AVCOL_SPC_BT709) {
+        // 色彩空间：BT.709 或 unspecified（回退 BT.709 并 warn 一次）；明确非 BT.709 标记拒绝
+        if (avframe->colorspace == AVCOL_SPC_UNSPECIFIED) {
+            if (!warnedColorSpace_) {
+                logWarn("color space unspecified, assume BT.709: " + videoPath_);
+                warnedColorSpace_ = true;
+            }
+        } else if (avframe->colorspace != AVCOL_SPC_BT709) {
             throw std::runtime_error("Video color space is not BT.709");
         }
 
@@ -246,6 +263,7 @@ bool NvdecDecoder::readFrame(std::unique_ptr<Frame>& frame) {
         gpu->height = avframe->height;
         gpu->device = Frame::Device::kCuda;
         gpu->pixFmt = Frame::PixFmt::kNv12;
+        gpu->fullRange = fullRange;
         gpu->data0 = avframe->data[0];
         gpu->data1 = avframe->data[1];
         gpu->linesize0 = avframe->linesize[0];

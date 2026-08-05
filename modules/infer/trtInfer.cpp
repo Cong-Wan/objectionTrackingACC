@@ -1,11 +1,12 @@
 /*
 Author: wilbur
-Version: 1.0
+Version: 1.1
 Date: 2026-08-04
 Description: TensorRT 推理实现（batch=1）。load：engine 读取/反序列化/shape 校验/buffer 分配/stream 创建；
     infer：GpuFrame NV12 预处理直写 TRT 输入 → enqueueV3 → D2H pinned → 后处理
     （conf 过滤、letterbox 逆映射、clamp 到显示宽高、class-aware NMS、conf 降序限 maxDetections）。
     每次 infer 末尾 cudaStreamSynchronize，返回时结果已可用。
+    1.1: 预处理调用传入 GpuFrame.fullRange，支持 limited-range 视频。
 */
 
 #include "trtInfer.h"
@@ -238,7 +239,7 @@ std::vector<Detection> TrtInfer::infer(const Frame& frame) {
     preprocessNv12ToNchw(gpu.data0, gpu.data1, gpu.width, gpu.height,
                          gpu.linesize0, gpu.linesize1,
                          static_cast<float*>(inputBuffer_.data()),
-                         0, 1, kInputWidth, kInputHeight, lb, stream_);
+                         0, 1, kInputWidth, kInputHeight, lb, gpu.fullRange, stream_);
 
     // 推理 + D2H
     if (!context_->enqueueV3(stream_)) {

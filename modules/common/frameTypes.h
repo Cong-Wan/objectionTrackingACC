@@ -1,6 +1,6 @@
 /*
 Author: wilbur
-Version: 1.0
+Version: 1.1
 Date: 2026-08-04
 Description: 帧与数据传递类型定义。
     - Frame：帧抽象基类（device/pixFmt 标识，解码/推理接口只依赖它）。
@@ -8,6 +8,7 @@ Description: 帧与数据传递类型定义。
     - Detection：单个检测结果（原图坐标系 xyxy）。
     - LetterboxParams：letterbox 缩放参数，预处理填充，后处理用于坐标还原。
     （本头文件禁止 include 任何 FFmpeg 头，AVFrame 仅前向声明）
+    1.1: Frame 增加 fullRange 标识（NV12 色彩量程），支持 limited-range 视频。
 */
 
 #pragma once
@@ -23,6 +24,7 @@ struct Frame {
     int height = 0;
     Device device = Device::kCuda;
     PixFmt pixFmt = PixFmt::kNv12;
+    bool fullRange = true;                      // NV12 量程：true=full(pc)，false=limited(tv)
     virtual ~Frame() = default;
 };
 
