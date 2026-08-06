@@ -1,9 +1,11 @@
 /*
-Author:
-Version: 1.5
-Date: 2026-08-04
+Author: wilbur
+Version: 1.6
+Date: 2026-08-06
 Description: 翻译 byte_tracker.py 的 STrack 与 BYTETracker 声明，补齐 xywh2ltwh 批量重载并保留 C++ 安全接口
     1.5: 新增 debugCallback 钩子（默认关闭，不改变行为），供应用层排查匹配代价明细。
+    1.6: maxTimeLost 按 track_buffer 计 tracker 帧（max(1,buffer)），构造传入 skipN；
+         debug 全量增强（vf 注入、状态事件、未匹配 cost、ID_BREAK/SWAP、lifecycle CSV、stats）。
 */
 
 #ifndef TRACKER_CPP_BYTE_TRACKER_H
@@ -14,10 +16,13 @@ Description: 翻译 byte_tracker.py 的 STrack 与 BYTETracker 声明，补齐 x
 #include "trackerConfig.h"
 
 #include <Eigen/Dense>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -82,7 +87,8 @@ public:
 
 class BYTETracker {
 public:
-    explicit BYTETracker(const TrackerConfig& args, int frameRate = 30);
+    // frameRate：有效处理帧率（通常 video_fps/N，仅日志）；skipN：启动跳帧参数
+    explicit BYTETracker(const TrackerConfig& args, int frameRate = 30, int skipN = 1);
     BYTETracker(const BYTETracker&) = delete;
     BYTETracker& operator=(const BYTETracker&) = delete;
     BYTETracker(BYTETracker&&) = delete;
@@ -110,7 +116,19 @@ public:
     // 调试钩子：设置后 update() 会回调输出高/低分划分、三轮匹配代价与耗时、轨迹状态统计；
     // 默认空（不输出、不改变任何行为）。仅供排查追踪问题使用。
     using DebugCallback = std::function<void(const std::string&)>;
-    void setDebugCallback(DebugCallback cb) { debugCallback = std::move(cb); }
+    void setDebugCallback(DebugCallback cb);
+
+    // 应用层在 update 前注入当前视频帧号（debug 日志 vf=）；-1 表示未知
+    void setCurrentVideoFrameId(int64_t videoFrameId) { currentVideoFrameId = videoFrameId; }
+    int64_t currentVideoFrameIdValue() const { return currentVideoFrameId; }
+
+    int skipNValue() const { return skipN; }
+    int maxTimeLostValue() const { return maxTimeLost; }
+    int trackerFrameRateValue() const { return trackerFrameRate; }
+
+    // debug 结束：汇总 stats；可选写出 lifecycle CSV
+    void logFinalStats() const;
+    bool dumpLifecycleCsv(const std::string& path) const;
 
     static std::vector<TrackPtr> jointStracks(const std::vector<TrackPtr>& tlista, const std::vector<TrackPtr>& tlistb);  // 合并两个轨迹列表（去重）
     static std::vector<TrackPtr> subStracks(const std::vector<TrackPtr>& tlista, const std::vector<TrackPtr>& tlistb);   // 轨迹列表差集
@@ -124,10 +142,65 @@ public:
     std::vector<TrackPtr> removedStracks;   // 已移除的轨迹列表（保留用于查询）
     int frameId;                            // 当前处理帧号
     TrackerConfig args;                     // 追踪器配置参数
-    int maxTimeLost;                        // 轨迹允许的最大丢失帧数
+    int maxTimeLost;                        // 轨迹允许的最大丢失帧数（tracker 帧）
+    int skipN;                              // 启动跳帧参数 N
+    int trackerFrameRate;                   // 构造时 frameRate（日志用）
     KalmanFilterXYAH kalmanFilter;          // 本追踪器实例的卡尔曼滤波器
     GmcFunction gmc;                        // 全局运动补偿回调函数
     DebugCallback debugCallback;            // 调试输出回调（默认空）
+
+private:
+    struct RecentRemoved {
+        int trackId = 0;
+        int tf = 0;
+        int64_t vf = -1;
+        double x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+        double score = 0;
+        std::string reason;
+    };
+
+    struct LifecycleRec {
+        int trackId = 0;
+        int birthTf = 0;
+        int deathTf = -1;
+        int64_t birthVf = -1;
+        int64_t deathVf = -1;
+        std::string deathReason;
+        int numUpdates = 0;
+        double sumCx = 0, sumCy = 0, sumW = 0, sumH = 0;
+        double maxScore = 0;
+        double minScore = 1e9;
+        bool dead = false;
+    };
+
+    struct DebugStats {
+        int totalNew = 0;
+        int totalRemove = 0;
+        int totalRefind = 0;
+        int totalLost = 0;
+        int idBreak = 0;
+        int idSwap = 0;
+        int lostNoDet = 0;
+        int lostNoMatch = 0;
+        int removeTimeout = 0;
+        int removeUnconfirmed = 0;
+        int removeDup = 0;
+        int removeOther = 0;
+    };
+
+    int64_t currentVideoFrameId = -1;
+    bool initLogged = false;
+    std::deque<RecentRemoved> recentRemoved;
+    std::unordered_map<int, LifecycleRec> lifecycle;
+    DebugStats stats{};
+
+    void emitDebug(const std::string& msg) const;
+    void logInitOnce();
+    void noteBirth(const TrackPtr& track);
+    void noteUpdate(const TrackPtr& track);
+    void noteDeath(const TrackPtr& track, const std::string& reason);
+    void pushRecentRemoved(const TrackPtr& track, const std::string& reason);
+    void checkIdBreak(const TrackPtr& newTrack);
 };
 
 BYTETracker createByteTracker();

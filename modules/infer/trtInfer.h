@@ -1,11 +1,12 @@
 /*
 Author: wilbur
-Version: 1.0
-Date: 2026-08-04
+Version: 1.1
+Date: 2026-08-06
 Description: TensorRT 推理引擎（inferRunner + postProcessor 合并，batch 恒为 1）。
-    加载 engine、校验 input [1,3,640,640] / output [1,7,8400]、NV12 零拷贝预处理直写输入、
-    enqueueV3 推理、output0 解析（conf 过滤 + letterbox 逆映射 + clamp + class-aware NMS）。
-    模型常量：输入 640x640、输出 7x8400（cxcywh + 3 类分数）、类别 0=fullBody 1=head 2=upperBody。
+    加载 engine、NV12 零拷贝预处理直写输入、enqueueV3 推理、YOLO detect 输出解析
+    （conf 过滤 + letterbox 逆映射 + clamp + class-aware NMS）。
+    1.1: 兼容 meta+plan 封装 engine；输入/输出 shape、锚点数、类别数从 engine 读取，废除 640/8400 硬编码。
+    应用层按 classId 规则取用（0=body 1=head 2=upperBody 等），不强制 numClasses==3。
 */
 
 #pragma once
@@ -16,6 +17,7 @@ Description: TensorRT 推理引擎（inferRunner + postProcessor 合并，batch 
 
 #include <cuda_runtime.h>
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -37,23 +39,30 @@ public:
     void load() override;
     std::vector<Detection> infer(const Frame& frame) override;
 
-private:
-    std::vector<Detection> postProcess(const LetterboxParams& lb, int64_t frameId);
+    int inputWidth() const { return inputW_; }
+    int inputHeight() const { return inputH_; }
+    int numClasses() const { return numClasses_; }
+    int numAnchors() const { return numAnchors_; }
+    const std::string& inputName() const { return inputName_; }
+    const std::string& outputName() const { return outputName_; }
 
-    // 模型常量（batch1.int8.engine 已确认事实）
-    static constexpr int kInputWidth = 640;
-    static constexpr int kInputHeight = 640;
-    static constexpr int kChannelCount = 3;
-    static constexpr int kOutputChannels = 7;
-    static constexpr int kAnchorCount = 8400;
-    static constexpr int kClassCount = 3;
-    static constexpr const char* kInputName = "images";
-    static constexpr const char* kOutputName = "output0";
+private:
+    std::vector<Detection> postProcess(const LetterboxParams& lb, int64_t frameId) const;
 
     std::string enginePath_;
     float confThreshold_;
     float nmsIouThreshold_;
     int maxDetections_;
+
+    // load() 后由 engine 填充
+    std::string inputName_;
+    std::string outputName_;
+    int inputW_ = 0;
+    int inputH_ = 0;
+    int outChannels_ = 0;   // 4 + numClasses
+    int numAnchors_ = 0;
+    int numClasses_ = 0;
+    bool outputLayoutA_ = true;  // true: [1,C,A]  false: [1,A,C]
 
     DeviceBuffer inputBuffer_;
     DeviceBuffer outputBuffer_;

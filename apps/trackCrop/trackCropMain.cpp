@@ -1,7 +1,7 @@
 /*
 Author: wilbur
-Version: 1.6
-Date: 2026-08-05
+Version: 1.8
+Date: 2026-08-06
 Description: trackCrop 应用入口：NVDEC 解码 -> TensorRT 检测（fullBody/head/upperBody）->
     head 送 ByteTrack 追踪 -> IoA 归属匹配（先 cls0 后 cls2）-> 匹配到的 body 框裁剪图按
     output/<视频名stem>/<trackId>/<%06d_cls类别>.png 无损保存。每 N 帧处理一帧。
@@ -16,6 +16,9 @@ Description: trackCrop 应用入口：NVDEC 解码 -> TensorRT 检测（fullBody
     output/<stem>/<stem>_debug.mp4，画面含各类检测框/det#N、track 框/id、归属连线/ioa、
     NO-MATCH/SMALL 标注与左上角信息面板。绘制在 bgr.clone() 副本上，裁剪 PNG 不受污染。
     1.6: 保存前增加 body/head 高度比过滤：cls2(半身) bodyH>1.5*headH，cls0(全身) bodyH>3*headH，不满足不保存。
+    1.7: 构造 BYTETracker 传入跳帧 N；update 前注入 vf；debug 增加 health 行、lifecycle CSV、tracker stats。
+    1.8: 修复 debug 视频左上角面板：行高误用 getFontScaleFromHeight 导致文字上半截被裁；
+    改为 getTextSize 计算行高/baseline，长 match 行自动折行。
 */
 
 #include "byteTracker.h"
@@ -303,23 +306,112 @@ const cv::Scalar kColorText(255, 255, 255);  // 面板白字
 
 void drawText(cv::Mat& img, const std::string& text, cv::Point org, double scale = 0.5,
               int thickness = 1) {
+    // org.y 为文字 baseline；调用方需保证 baseline 下方有足够空间，避免上半截被裁出画面
     cv::putText(img, text, org, cv::FONT_HERSHEY_SIMPLEX, scale, kColorText, thickness, cv::LINE_AA);
 }
 
-void drawPanel(cv::Mat& img, const std::vector<std::string>& lines) {
-    int pad = 6;
-    double scale = 0.5;
-    int lineH = static_cast<int>(cv::getFontScaleFromHeight(cv::FONT_HERSHEY_SIMPLEX, 14, 1));
-    int maxW = 0;
-    for (auto& l : lines) {
-        int w = static_cast<int>(cv::getTextSize(l, cv::FONT_HERSHEY_SIMPLEX, scale, 1, nullptr).width);
-        if (w > maxW) maxW = w;
+// 将超长行按像素宽度粗略折行（按空格优先，否则硬切）
+std::vector<std::string> wrapPanelLine(const std::string& line, double scale, int thickness,
+                                       int maxTextW) {
+    std::vector<std::string> out;
+    if (line.empty()) {
+        out.push_back("");
+        return out;
     }
-    int panelW = maxW + pad * 2;
-    int panelH = lineH * static_cast<int>(lines.size()) + pad * 2;
+    int baseline = 0;
+    cv::Size full = cv::getTextSize(line, cv::FONT_HERSHEY_SIMPLEX, scale, thickness, &baseline);
+    if (full.width <= maxTextW) {
+        out.push_back(line);
+        return out;
+    }
+    std::string cur;
+    size_t i = 0;
+    while (i < line.size()) {
+        size_t sp = line.find(' ', i);
+        std::string token = (sp == std::string::npos) ? line.substr(i) : line.substr(i, sp - i + 1);
+        if (token.empty()) {
+            i = (sp == std::string::npos) ? line.size() : sp + 1;
+            continue;
+        }
+        std::string trial = cur + token;
+        int b = 0;
+        cv::Size sz = cv::getTextSize(trial, cv::FONT_HERSHEY_SIMPLEX, scale, thickness, &b);
+        if (!cur.empty() && sz.width > maxTextW) {
+            out.push_back(cur);
+            cur = token;
+            // 单 token 仍超宽则硬切
+            while (true) {
+                int bb = 0;
+                cv::Size tsz = cv::getTextSize(cur, cv::FONT_HERSHEY_SIMPLEX, scale, thickness, &bb);
+                if (tsz.width <= maxTextW || cur.size() <= 1) break;
+                // 二分缩到宽度内
+                size_t lo = 1, hi = cur.size();
+                while (lo + 1 < hi) {
+                    size_t mid = (lo + hi) / 2;
+                    int b2 = 0;
+                    cv::Size msz = cv::getTextSize(cur.substr(0, mid), cv::FONT_HERSHEY_SIMPLEX,
+                                                   scale, thickness, &b2);
+                    if (msz.width <= maxTextW) lo = mid;
+                    else hi = mid;
+                }
+                out.push_back(cur.substr(0, lo));
+                cur = cur.substr(lo);
+            }
+        } else {
+            cur = trial;
+        }
+        i = (sp == std::string::npos) ? line.size() : sp + 1;
+    }
+    if (!cur.empty()) out.push_back(cur);
+    if (out.empty()) out.push_back(line);
+    return out;
+}
+
+void drawPanel(cv::Mat& img, const std::vector<std::string>& lines) {
+    // 修复：旧实现把 getFontScaleFromHeight 的返回值当像素行高（实际是 scale），
+    // 导致 lineH≈0、面板过矮，putText baseline 把字形上半截裁到面板外。
+    const int pad = 8;
+    const double scale = 0.55;
+    const int thickness = 1;
+    const int maxPanelW = std::max(320, img.cols - 20);  // 留边，避免贴死右边界
+    const int maxTextW = std::max(80, maxPanelW - pad * 2);
+
+    std::vector<std::string> wrapped;
+    wrapped.reserve(lines.size() * 2);
+    for (const auto& l : lines) {
+        auto parts = wrapPanelLine(l, scale, thickness, maxTextW);
+        wrapped.insert(wrapped.end(), parts.begin(), parts.end());
+    }
+    if (wrapped.empty()) return;
+
+    int maxW = 0;
+    int textH = 0;
+    int baseline = 0;
+    for (const auto& l : wrapped) {
+        int b = 0;
+        cv::Size sz = cv::getTextSize(l.empty() ? "A" : l, cv::FONT_HERSHEY_SIMPLEX, scale,
+                                      thickness, &b);
+        if (sz.width > maxW) maxW = sz.width;
+        if (sz.height > textH) textH = sz.height;
+        if (b > baseline) baseline = b;
+    }
+    // 行距 = 字形高度 + baseline 下降 + 行间距
+    const int lineGap = 4;
+    const int lineH = textH + baseline + lineGap;
+    int panelW = std::min(maxPanelW, maxW + pad * 2);
+    int panelH = lineH * static_cast<int>(wrapped.size()) + pad * 2 - lineGap;
+    panelW = std::min(panelW, img.cols);
+    panelH = std::min(panelH, img.rows);
+
     cv::rectangle(img, cv::Rect(0, 0, panelW, panelH), kColorPanel, cv::FILLED);
-    for (size_t i = 0; i < lines.size(); ++i) {
-        drawText(img, lines[i], cv::Point(pad, pad + lineH * (static_cast<int>(i) + 1) - 3), scale);
+    // 半透明感：再画一层深灰边框
+    cv::rectangle(img, cv::Rect(0, 0, panelW, panelH), cv::Scalar(80, 80, 80), 1);
+
+    for (size_t i = 0; i < wrapped.size(); ++i) {
+        // putText 的 y 是 baseline：第一行 baseline = pad + textH
+        const int y = pad + textH + static_cast<int>(i) * lineH;
+        if (y >= panelH) break;
+        drawText(img, wrapped[i], cv::Point(pad, y), scale, thickness);
     }
 }
 
@@ -461,18 +553,34 @@ int main(int argc, char** argv) {
         TrtInfer infer(args.enginePath, args.conf);
         infer.load();
 
-        // 6. 按 fps/N 设定 tracker 帧率（时间语义与抽帧对齐）
+        // 6. 按 fps/N 设定 tracker 有效帧率（日志/秒数换算）；maxTimeLost=max(1,track_buffer)
         cfg.frameRate = std::max(1, static_cast<int>(std::lround(decoder.fps() / args.n)));
         trackerCpp::BYTETracker::resetId();
-        trackerCpp::BYTETracker tracker(cfg, cfg.frameRate);
+        trackerCpp::BYTETracker tracker(cfg, cfg.frameRate, args.n);
         if (args.debug) {
             tracker.setDebugCallback([](const std::string& m) { logDebug(m); });
+            logDebug("app tracker: N=" + std::to_string(args.n) +
+                     " video_fps=" + std::to_string(decoder.fps()) +
+                     " tracker_frameRate=" + std::to_string(cfg.frameRate) +
+                     " track_buffer=" + std::to_string(cfg.trackBuffer) +
+                     " maxTimeLost=" + std::to_string(tracker.maxTimeLostValue()) +
+                     " (video_frames=" + std::to_string(tracker.maxTimeLostValue() * args.n) +
+                     ", seconds=" + std::to_string(
+                         static_cast<double>(tracker.maxTimeLostValue()) /
+                         static_cast<double>(std::max(1, cfg.frameRate))) +
+                     ")");
         }
 
         // 7. 输出目录 output/<视频名stem>，trackId 子目录为纯 trackId
         std::string videoStem = std::filesystem::path(args.videoPath).stem().string();
         std::filesystem::path outRoot = std::filesystem::path(args.outputDir) / videoStem;
         std::filesystem::create_directories(outRoot);
+        // debug 生命周期 CSV 写到 debug/<stem>/（与 debug 视频同视频名）
+        std::filesystem::path debugRoot = std::filesystem::path("./debug") / videoStem;
+        if (args.debug) {
+            std::error_code ecDbg;
+            std::filesystem::create_directories(debugRoot, ecDbg);
+        }
 
         // 8. debug 模式创建 NVENC 硬编码器，输出 output/<stem>/<stem>_debug.mp4
         //    只编码处理帧（frameId % N == 0），fps = decoder.fps()/N，与日志帧号对齐
@@ -568,11 +676,54 @@ int main(int argc, char** argv) {
                 input.cls(static_cast<Eigen::Index>(i)) = 1.0;
             }
             auto tTrack0 = std::chrono::steady_clock::now();
+            tracker.setCurrentVideoFrameId(frame->frameId);
             Eigen::MatrixXf tracks = tracker.update(input);  // 每行 [x1,y1,x2,y2,trackId,score,cls,idx]
             double trackMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - tTrack0).count();
             trackMsTotal += trackMs;
             if (args.debug) {
+                // P2 health：orphan heads / orphan tracks（几何粗判：中心落在 track 内计关联）
+                int headHigh = 0, headLow = 0;
+                for (const auto& hd : heads) {
+                    if (hd.det.confidence >= static_cast<float>(cfg.trackHighThresh)) ++headHigh;
+                    else if (hd.det.confidence > static_cast<float>(cfg.trackLowThresh)) ++headLow;
+                }
+                int orphanHeads = 0;
+                for (const auto& hd : heads) {
+                    const float hcx = 0.5f * (hd.det.x1 + hd.det.x2);
+                    const float hcy = 0.5f * (hd.det.y1 + hd.det.y2);
+                    bool covered = false;
+                    for (int r = 0; r < tracks.rows(); ++r) {
+                        if (hcx >= tracks(r, 0) && hcx <= tracks(r, 2) &&
+                            hcy >= tracks(r, 1) && hcy <= tracks(r, 3)) {
+                            covered = true;
+                            break;
+                        }
+                    }
+                    if (!covered) ++orphanHeads;
+                }
+                int orphanTracks = 0;
+                for (int r = 0; r < tracks.rows(); ++r) {
+                    const float tcx = 0.5f * (tracks(r, 0) + tracks(r, 2));
+                    const float tcy = 0.5f * (tracks(r, 1) + tracks(r, 3));
+                    bool hitHead = false;
+                    for (const auto& hd : heads) {
+                        if (tcx >= hd.det.x1 && tcx <= hd.det.x2 &&
+                            tcy >= hd.det.y1 && tcy <= hd.det.y2) {
+                            hitHead = true;
+                            break;
+                        }
+                    }
+                    if (!hitHead) ++orphanTracks;
+                }
+                logDebug("frame " + std::to_string(frame->frameId) +
+                         " health: heads=" + std::to_string(heads.size()) +
+                         " head_high=" + std::to_string(headHigh) +
+                         " head_low=" + std::to_string(headLow) +
+                         " tracks=" + std::to_string(tracks.rows()) +
+                         " orphan_heads=" + std::to_string(orphanHeads) +
+                         " orphan_tracks=" + std::to_string(orphanTracks));
+
                 logDebug("frame " + std::to_string(frame->frameId) + " tracks=" +
                          std::to_string(tracks.rows()));
                 for (int r = 0; r < tracks.rows(); ++r) {
@@ -801,6 +952,16 @@ int main(int argc, char** argv) {
         if (encoder) {
             encoder->close();
             encoder.reset();
+        }
+
+        if (args.debug) {
+            tracker.logFinalStats();
+            std::filesystem::path csvPath = debugRoot / "tracks_lifecycle.csv";
+            if (tracker.dumpLifecycleCsv(csvPath.string())) {
+                logDebug("lifecycle csv: " + csvPath.string());
+            } else {
+                logWarn("lifecycle csv write failed: " + csvPath.string());
+            }
         }
 
         auto elapsed = std::chrono::steady_clock::now() - startTime;

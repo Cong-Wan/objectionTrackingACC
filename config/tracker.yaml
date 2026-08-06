@@ -1,15 +1,19 @@
-# Author:
-# Version: 1.1
-# Date: 2026-06-05
+# Author: wilbur
+# Version: 1.2
+# Date: 2026-08-06
 # Description: ByteTrack 追踪参数配置，字段名与 BYTETracker 内部参数保持一致，缺省字段由代码内默认值兜底
+#   1.2: track_buffer 语义改为 tracker 处理帧计数；真实时间 ≈ buffer * N / video_fps
+#        frame_rate 可被应用层覆盖为 video_fps/N，不再参与 maxTimeLost 的 /30 缩放
 
 track_high_thresh: 0.6
 track_low_thresh: 0.04
 new_track_thresh: 0.2
+# 丢失后允许保留的 tracker 处理帧数（每个处理帧对应 N 个视频帧）
 track_buffer: 5
 match_thresh: 0.9
 aspect_ratio_thresh: 1.5
 min_box_area: 10
 mot20: false
 fuse_score: false
+# 可被应用层按 fps/N 覆盖；仅日志/秒数换算，不进入 maxTimeLost=max(1,track_buffer)
 frame_rate: 30
